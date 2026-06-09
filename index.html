@@ -1,0 +1,742 @@
+
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>週末遊戲時間銀行</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+  <style>
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(20px) scale(0.95); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    .animate-fade-in-up { animation: fadeInUp 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+  </style>
+</head>
+<body class="bg-slate-50 min-h-screen text-slate-800 font-sans">
+  
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const firebaseConfig = {
+      apiKey: "AIzaSyBF7zDjqOYa5TMb36Ao00nH3TEPmMvVYPY",
+      authDomain: "family-time-bank.firebaseapp.com",
+      projectId: "family-time-bank",
+      storageBucket: "family-time-bank.firebasestorage.app",
+      messagingSenderId: "33780050612",
+      appId: "1:33780050612:web:ba2f5fac10d610fac6c5e1"
+    };
+
+    if (!firebase.apps.length) {
+      firebase.initializeApp(firebaseConfig);
+    }
+    
+    const auth = firebase.auth();
+    const db = firebase.firestore();
+
+    const { useState, useEffect } = React;
+
+    function App() {
+      // 系統與認證狀態
+      const [authUser, setAuthUser] = useState(null);
+      const [authLoading, setAuthLoading] = useState(true);
+      const [role, setRole] = useState(null);
+      const [userRoles, setUserRoles] = useState({});
+
+      // 資料庫狀態
+      const [chengweiData, setChengweiData] = useState({ balance: 0, submission: null, history: [] });
+      const [jingjieData, setJingjieData] = useState({ balance: 0, submission: null, history: [] });
+      const [isOffline, setIsOffline] = useState(false);
+      
+      // 介面控制狀態
+      const [selectedTasks, setSelectedTasks] = useState([]);
+      const [redeemMode, setRedeemMode] = useState(false);
+      const [redeemMins, setRedeemMins] = useState(30);
+      const [historyTab, setHistoryTab] = useState('all'); 
+      const [expandedLogId, setExpandedLogId] = useState(null); 
+      
+      // 彈窗系統
+      const [dialog, setDialog] = useState(null); 
+      const [editForm, setEditForm] = useState({ reason: '', points: 0 }); 
+
+      const [manualReason, setManualReason] = useState({ chengwei: '', jingjie: '' });
+      const [manualPoints, setManualPoints] = useState({ chengwei: '', jingjie: '' });
+      const [parentVerified, setParentVerified] = useState({});
+
+      const appId = typeof __app_id !== 'undefined' ? __app_id : 'family-time-bank';
+      const getDocRef = (docId) => db.collection('artifacts').doc(appId).collection('public').doc('data').collection('TimeBank').doc(docId);
+
+      // --- 彈窗輔助函式 ---
+      const showAlert = (title, message) => setDialog({ type: 'alert', title, message });
+      const showConfirm = (title, message, onConfirm) => setDialog({ type: 'confirm', title, message, onConfirm });
+
+      // --- 1. 監聽 Google 登入狀態 ---
+      useEffect(() => {
+        const unsubAuth = auth.onAuthStateChanged((user) => {
+          setAuthLoading(false);
+          if (user) {
+            setAuthUser(user);
+          } else {
+            setAuthUser(null);
+            setRole(null);
+          }
+        });
+        return () => unsubAuth();
+      }, []);
+
+      // --- 2. 連線資料庫 ---
+      useEffect(() => {
+        if (!authUser) return;
+
+        const unsubRoles = getDocRef('user_roles').onSnapshot((snap) => {
+          if (snap.exists) {
+            const roles = snap.data();
+            setUserRoles(roles);
+            setRole(roles[authUser.uid] || null);
+          } else {
+            getDocRef('user_roles').set({});
+          }
+        }, () => setIsOffline(true));
+
+        const unsubCW = getDocRef('chengwei').onSnapshot((snap) => {
+          if (snap.exists) setChengweiData(snap.data());
+          else getDocRef('chengwei').set({ balance: 0, submission: null, history: [] });
+        });
+
+        const unsubJJ = getDocRef('jingjie').onSnapshot((snap) => {
+          if (snap.exists) setJingjieData(snap.data());
+          else getDocRef('jingjie').set({ balance: 0, submission: null, history: [] });
+        });
+
+        return () => { unsubRoles(); unsubCW(); unsubJJ(); };
+      }, [authUser]);
+
+      const saveChildData = async (kid, updatedFields) => {
+        if (isOffline) {
+          if (kid === 'chengwei') setChengweiData(prev => ({ ...prev, ...updatedFields }));
+          if (kid === 'jingjie') setJingjieData(prev => ({ ...prev, ...updatedFields }));
+          return;
+        }
+        const currentData = kid === 'chengwei' ? chengweiData : jingjieData;
+        try {
+          await getDocRef(kid).set({ ...currentData, ...updatedFields });
+        } catch (error) {
+          showAlert("連線錯誤", "資料儲存失敗，請檢查網路狀態。");
+        }
+      };
+
+      const handleGoogleLogin = () => {
+        const provider = new firebase.auth.GoogleAuthProvider();
+        auth.signInWithPopup(provider).catch(err => {
+          if (err.code === 'auth/popup-blocked' || err.message.includes('cross-origin')) {
+              showAlert("環境限制", "無法彈出登入視窗，請直接前往 Cloudflare 實際網址進行測試！");
+          } else {
+              showAlert("登入失敗", "請確認網域已加入 Firebase 白名單。\n" + err.message);
+          }
+        });
+      };
+
+      const handleBindRole = async (selectedRole) => {
+        if (!authUser) return;
+        try {
+          await getDocRef('user_roles').set({ ...userRoles, [authUser.uid]: selectedRole });
+          setRole(selectedRole);
+        } catch (error) {
+          showAlert("設定失敗", "無法綁定帳號，請確認權限。");
+        }
+      };
+
+      // 統合數據
+      const data = {
+        balances: { chengwei: chengweiData.balance || 0, jingjie: jingjieData.balance || 0 },
+        submissions: { chengwei: chengweiData.submission || null, jingjie: jingjieData.submission || null },
+        history: [
+          ...(chengweiData.history || []).map(h => ({ ...h, kid: 'chengwei' })),
+          ...(jingjieData.history || []).map(h => ({ ...h, kid: 'jingjie' }))
+        ].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+      };
+
+      const getSubmission = (kid) => data.submissions?.[kid] || { status: 'none', date: '', time: '', points: 0, details: [] };
+      const todayStr = new Date().toLocaleDateString('zh-TW');
+
+      // --- 孩子功能 ---
+      const submitTasks = (kid, totalPoints, taskDetails) => {
+        if (selectedTasks.length === 0) return showAlert("提醒", "請至少勾選一項已完成的任務喔！");
+        saveChildData(kid, {
+          submission: {
+            status: 'pending', date: todayStr,
+            time: new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' }),
+            points: totalPoints, details: taskDetails 
+          }
+        });
+      };
+
+      const cancelSubmission = (kid, currentRoleTasks) => {
+        const sub = getSubmission(kid);
+        if (sub && sub.details) {
+          const idsToSelect = currentRoleTasks
+            .filter(t => sub.details.some(d => (d.id ? d.id === t.id : d === t.title)))
+            .map(t => t.id);
+          setSelectedTasks(idsToSelect);
+        }
+        saveChildData(kid, { submission: null });
+      };
+
+      const handleRedeem = (kid) => {
+        if (redeemMins > data.balances[kid]) return showAlert("無法兌換", "餘額不足，無法兌換這麼多分鐘喔！");
+        showConfirm("確認兌換", `確定要使用 ${redeemMins} 分鐘兌換遊戲時間嗎？`, () => {
+          const newHistoryItem = {
+            id: Date.now().toString(), kid, action: `🎮 兌換遊戲時間`, points: -redeemMins,
+            date: todayStr, time: new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' }),
+            type: 'redeem', details: [`自主兌換了 ${redeemMins} 分鐘`], timestamp: Date.now()
+          };
+          const currentHistory = kid === 'chengwei' ? chengweiData.history : jingjieData.history;
+          saveChildData(kid, {
+            balance: data.balances[kid] - redeemMins,
+            history: [newHistoryItem, ...(currentHistory || [])].slice(0, 100)
+          });
+          setRedeemMode(false);
+        });
+      };
+
+      // --- 爸媽功能 ---
+      const approveTask = (kid, pointsToAdd, verifiedTitles) => {
+        const sub = getSubmission(kid);
+        const newHistoryItem = {
+          id: Date.now().toString(), kid, action: '✅ 每日任務打卡 (已核准)', points: pointsToAdd,
+          date: sub.date, time: sub.time, type: 'daily', details: verifiedTitles, timestamp: Date.now()
+        };
+        const currentHistory = kid === 'chengwei' ? chengweiData.history : jingjieData.history;
+        saveChildData(kid, {
+          balance: data.balances[kid] + pointsToAdd,
+          submission: { ...sub, status: 'approved' },
+          history: [newHistoryItem, ...(currentHistory || [])].slice(0, 100)
+        });
+        setParentVerified(prev => { const n = {...prev}; delete n[kid]; return n; });
+      };
+
+      const executeManualUpdate = (kid, isAdd) => {
+        const reason = manualReason[kid];
+        const pts = parseInt(manualPoints[kid], 10);
+        if (!reason || reason.trim() === '') return showAlert("輸入錯誤", "請填寫加/扣分事由！");
+        if (isNaN(pts) || pts <= 0) return showAlert("輸入錯誤", "請填寫大於 0 的正確分數！");
+
+        const finalPoints = isAdd ? pts : -pts;
+        const newHistoryItem = {
+          id: Date.now().toString(), kid, action: isAdd ? `🌟 家長加分` : `⚠️ 家長扣分`, points: finalPoints,
+          date: todayStr, time: new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' }),
+          type: 'manual', details: [`事由：${reason}`], timestamp: Date.now()
+        };
+        const currentHistory = kid === 'chengwei' ? chengweiData.history : jingjieData.history;
+        saveChildData(kid, {
+          balance: Math.max(0, data.balances[kid] + finalPoints),
+          history: [newHistoryItem, ...(currentHistory || [])].slice(0, 100)
+        });
+        setManualReason({...manualReason, [kid]: ''});
+        setManualPoints({...manualPoints, [kid]: ''});
+      };
+
+      const executeQuickPenalty = (kid, reason, penaltyPoints) => {
+         showConfirm("確認違規扣分", `確定要因為「${reason}」扣除 ${penaltyPoints} 分嗎？`, () => {
+             const newHistoryItem = {
+               id: Date.now().toString() + kid + 'penalty', kid: kid, action: `🚨 公告欄違規扣分`, points: -penaltyPoints,
+               date: todayStr, time: new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' }),
+               type: 'manual', details: [`事由：${reason}`], timestamp: Date.now()
+             };
+             const currentHistory = kid === 'chengwei' ? chengweiData.history : jingjieData.history;
+             saveChildData(kid, {
+               balance: Math.max(0, data.balances[kid] - penaltyPoints),
+               history: [newHistoryItem, ...(currentHistory || [])].slice(0, 100)
+             });
+             showAlert("扣分完成", `已成功扣除 ${penaltyPoints} 分。`);
+         });
+      };
+
+      const handleDeleteHistory = (kid, record) => {
+         showConfirm("刪除紀錄", `確定要刪除這筆紀錄嗎？\n系統會自動將分數扣回 / 加回。\n\n項目：${record.action} (${record.points}分)`, () => {
+             const currentHistory = kid === 'chengwei' ? chengweiData.history : jingjieData.history;
+             const newHistory = currentHistory.filter(h => h.id !== record.id);
+             const newBalance = Math.max(0, data.balances[kid] - record.points);
+             
+             let updateObj = { balance: newBalance, history: newHistory };
+             if (record.type === 'daily' && record.date === todayStr) {
+                 updateObj.submission = null;
+                 showAlert("已重置", "已刪除今日任務紀錄，孩子端已重新開放打卡！");
+             }
+             saveChildData(kid, updateObj);
+         });
+      };
+
+      const handleEditHistoryClick = (kid, record) => {
+          setEditForm({ reason: record.action, points: record.points });
+          setDialog({ type: 'edit', title: '修改紀錄', record: record, kid: kid });
+      };
+
+      const submitEditForm = () => {
+          const { kid, record } = dialog;
+          const newReason = editForm.reason;
+          const newPoints = parseInt(editForm.points, 10);
+          
+          if (!newReason.trim()) return showAlert("錯誤", "事由不能為空！");
+          if (isNaN(newPoints)) return showAlert("錯誤", "分數格式不正確！");
+          
+          const currentHistory = kid === 'chengwei' ? chengweiData.history : jingjieData.history;
+          const pointDiff = newPoints - record.points;
+          const newBalance = Math.max(0, data.balances[kid] + pointDiff);
+          
+          const newHistory = currentHistory.map(h => {
+              if (h.id === record.id) return { ...h, action: newReason, points: newPoints, details: [...(h.details||[]), `(已修改內容)`] };
+              return h;
+          });
+          
+          saveChildData(kid, { balance: newBalance, history: newHistory });
+          setDialog(null);
+      };
+
+      // --- UI 共用組件 (結合全新樣式) ---
+      const renderTopHeader = () => (
+        <div className="bg-[#5B5CE6] text-white shadow-md mb-6 sticky top-0 z-40">
+          <div className="max-w-4xl mx-auto px-4 sm:px-8 py-4 sm:py-6 flex flex-col sm:flex-row sm:justify-between items-center space-y-4 sm:space-y-0">
+            {/* 左側標題 */}
+            <div className="flex items-center w-full sm:w-auto justify-center sm:justify-start">
+              <span className="text-4xl mr-3 font-bold">🏦</span>
+              <div>
+                <h1 className="font-black text-2xl md:text-3xl tracking-wider">週末遊戲時間銀行</h1>
+                <p className="text-sm text-indigo-200 font-bold tracking-widest mt-1 uppercase opacity-90">Family Time Bank</p>
+              </div>
+            </div>
+            
+            {/* 右側登入狀態 (完美復刻設計) */}
+            {authUser ? (
+              <div className="flex items-center bg-white/10 backdrop-blur-md px-4 py-2 rounded-xl border border-white/20 animate-fade-in-up">
+                <img src={authUser.photoURL || 'https://via.placeholder.com/40'} className="w-8 h-8 md:w-10 md:h-10 rounded-full border-2 border-indigo-300 mr-3" />
+                <div className="text-left hidden md:block mr-4">
+                  <p className="text-xs text-indigo-200 font-black leading-none uppercase">Google Account</p>
+                  <p className="text-sm font-bold truncate max-w-[150px] mt-0.5">{authUser.displayName}</p>
+                </div>
+                {/* 移除了切換身分按鈕，只保留登出 */}
+                <button onClick={() => auth.signOut()} className="bg-white text-[#5B5CE6] hover:bg-indigo-50 font-black text-sm px-4 py-2 rounded-full transition-colors shadow-sm ml-2">
+                  登出
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center bg-white/10 backdrop-blur-md pl-4 pr-2 py-2 rounded-[2rem] border border-white/20">
+                <div className="w-8 h-8 bg-indigo-400/40 rounded-full flex items-center justify-center mr-3 text-lg">👤</div>
+                <span className="font-bold text-base mr-4">尚未登入</span>
+                <button onClick={handleGoogleLogin} className="bg-white text-[#5B5CE6] hover:bg-indigo-50 font-black text-sm px-5 py-2.5 rounded-full transition-colors shadow-sm flex items-center">
+                  Google 登入
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+
+      const renderDialogModal = () => {
+        if (!dialog) return null;
+        return (
+          <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-[2px] z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-3xl shadow-2xl max-w-md w-full p-6 md:p-8 animate-fade-in-up border border-slate-100">
+               <h3 className="font-black text-2xl text-slate-800 mb-3 flex items-center">
+                  {dialog.type === 'alert' && '⚠️'} {dialog.type === 'confirm' && '❓'} {dialog.type === 'edit' && '✏️'}
+                  <span className="ml-2">{dialog.title}</span>
+               </h3>
+               {dialog.message && <p className="text-slate-600 font-medium whitespace-pre-wrap text-base md:text-lg leading-relaxed">{dialog.message}</p>}
+               
+               {dialog.type === 'alert' && (
+                  <button onClick={()=>setDialog(null)} className="w-full mt-8 py-4 bg-[#5B5CE6] text-white rounded-xl font-bold text-lg">我知道了</button>
+               )}
+               {dialog.type === 'confirm' && (
+                  <div className="flex space-x-4 mt-8">
+                     <button onClick={()=>setDialog(null)} className="flex-1 py-4 bg-slate-100 text-slate-600 rounded-xl font-bold text-lg">取消</button>
+                     <button onClick={()=>{ dialog.onConfirm(); setDialog(null); }} className="flex-1 py-4 bg-[#5B5CE6] text-white rounded-xl font-bold text-lg">確定執行</button>
+                  </div>
+               )}
+               {dialog.type === 'edit' && (
+                  <div className="mt-6 space-y-4">
+                     <div>
+                        <label className="text-sm font-bold text-slate-500">修改事由：</label>
+                        <input type="text" value={editForm.reason} onChange={e=>setEditForm({...editForm, reason: e.target.value})} className="w-full mt-2 p-3 border rounded-xl text-base bg-slate-50 focus:ring-2 focus:ring-indigo-200 outline-none" />
+                     </div>
+                     <div>
+                        <label className="text-sm font-bold text-slate-500">修改分數 (扣分請加負號 -)：</label>
+                        <input type="number" value={editForm.points} onChange={e=>setEditForm({...editForm, points: e.target.value})} className="w-full mt-2 p-3 border rounded-xl text-base bg-slate-50 focus:ring-2 focus:ring-indigo-200 outline-none" />
+                     </div>
+                     <div className="flex space-x-3 mt-8">
+                        <button onClick={()=>setDialog(null)} className="flex-1 py-3 bg-slate-100 text-slate-600 rounded-xl font-bold text-lg">取消</button>
+                        <button onClick={submitEditForm} className="flex-1 py-3 bg-[#5B5CE6] text-white rounded-xl font-bold text-lg">儲存修改</button>
+                     </div>
+                  </div>
+               )}
+            </div>
+          </div>
+        );
+      };
+
+      if (authLoading) return <div className="min-h-screen flex items-center justify-center font-bold text-slate-500 text-lg animate-pulse">雲端銀行初始化中...</div>;
+
+      // --- 畫面 1：Google 登入 (首頁) ---
+      if (!authUser) return (
+        <div>
+          {renderTopHeader()}
+          {renderDialogModal()}
+          <div className="max-w-4xl mx-auto p-4 md:p-8">
+            <div className="bg-amber-50 border-2 border-amber-200 rounded-2xl p-6 md:p-8 flex items-start space-x-4 shadow-sm animate-fade-in-up">
+              <span className="text-4xl">💳</span>
+              <div>
+                <h2 className="text-xl md:text-2xl font-black text-amber-900 mb-2">請小朋友記得先登入唷！</h2>
+                <p className="text-base md:text-lg text-amber-800 font-medium leading-relaxed">
+                  分別登入您的個人 Google 帳號，排定專屬身分後，埕緯與敬傑的時間帳戶及明細才不會混在一起。
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+
+      // --- 畫面 2：身分綁定 (第一次登入限定) ---
+      if (!role) return (
+        <div>
+          {renderTopHeader()}
+          {renderDialogModal()}
+          <div className="max-w-2xl mx-auto p-6 bg-white rounded-3xl shadow-lg border border-slate-100 text-center mx-4 mt-6">
+            <h2 className="text-2xl font-black text-slate-800 mb-3">👋 歡迎，{authUser.displayName}</h2>
+            <p className="text-slate-500 mb-8 font-medium text-base md:text-lg">這是您第一次登入，請選擇您的專屬身分。<br/>綁定後，未來登入將會直接進入您的畫面！</p>
+            <div className="space-y-4 md:space-y-6">
+              <button onClick={() => handleBindRole('chengwei')} className="w-full p-6 bg-blue-500 text-white rounded-2xl font-black text-xl md:text-2xl shadow-md transition-transform active:scale-95 flex items-center justify-between">
+                <span className="text-4xl drop-shadow-sm">👦</span><span>我是 哥哥 (埕緯)</span><span className="text-sm bg-white/20 px-4 py-1.5 rounded-full">點選綁定</span>
+              </button>
+              <button onClick={() => handleBindRole('jingjie')} className="w-full p-6 bg-emerald-500 text-white rounded-2xl font-black text-xl md:text-2xl shadow-md transition-transform active:scale-95 flex items-center justify-between">
+                <span className="text-4xl drop-shadow-sm">🧒</span><span>我是 弟弟 (敬傑)</span><span className="text-sm bg-white/20 px-4 py-1.5 rounded-full">點選綁定</span>
+              </button>
+              <div className="relative py-4 md:py-6"><div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-200"></div></div><div className="relative flex justify-center"><span className="bg-white px-6 text-sm text-slate-400 font-bold">管理員專區</span></div></div>
+              <button onClick={() => handleBindRole('parent')} className="w-full p-5 bg-slate-800 text-white rounded-2xl font-bold text-lg md:text-xl shadow-md transition-transform active:scale-95">🛡️ 爸媽專屬後台</button>
+            </div>
+          </div>
+        </div>
+      );
+
+      // --- 畫面 3：爸媽管理後台 ---
+      if (role === 'parent') return (
+        <div>
+          {renderTopHeader()}
+          {renderDialogModal()}
+          <div className="p-4 md:p-8 max-w-5xl mx-auto space-y-8 font-sans">
+            <h2 className="text-2xl font-black text-center text-slate-800">家庭管理中心</h2>
+            {['chengwei', 'jingjie'].map(k => {
+              const sub = getSubmission(k);
+              const kidHistory = (data.history || []).filter(h => h.kid === k);
+              
+              let statusBadge = <span className="text-slate-500 bg-slate-200 px-4 py-1.5 rounded-full font-bold ml-3 text-sm md:text-base">⚪ 尚未送出</span>;
+              if (sub.status === 'pending') statusBadge = <span className="text-amber-700 bg-amber-100 px-4 py-1.5 rounded-full font-bold ml-3 text-sm md:text-base animate-pulse">🟡 待核准 ({sub.time})</span>;
+              else if (sub.status === 'approved') statusBadge = <span className="text-emerald-700 bg-emerald-100 px-4 py-1.5 rounded-full font-bold ml-3 text-sm md:text-base">🟢 已完成核准</span>;
+
+              const kidChecks = parentVerified[k] || (sub.details || []).map(t => typeof t === 'object' ? t.id : t);
+              const verifiedPoints = (sub.details || [])
+                  .filter(t => kidChecks.includes(typeof t === 'object' ? t.id : t))
+                  .reduce((sum, t) => sum + (typeof t === 'object' ? (t.points || 0) : 0), 0);
+              const verifiedTitles = (sub.details || [])
+                  .filter(t => kidChecks.includes(typeof t === 'object' ? t.id : t))
+                  .map(t => typeof t === 'object' ? t.title : t);
+
+              const toggleParentVerify = (taskId) => {
+                  setParentVerified(prev => {
+                      let checks = prev[k];
+                      if (!checks) checks = (sub.details || []).map(t => typeof t === 'object' ? t.id : t);
+                      return { ...prev, [k]: checks.includes(taskId) ? checks.filter(id => id !== taskId) : [...checks, taskId] };
+                  });
+              };
+
+              return (
+                <div key={k} className="bg-white rounded-[2rem] border shadow-md overflow-hidden mb-8">
+                  <div className="p-6 md:p-8 border-b border-slate-100 bg-gradient-to-br from-slate-50 to-white flex justify-between items-center">
+                    <p className="font-black text-2xl md:text-3xl text-slate-800">{k === 'chengwei' ? '👦 哥哥 (埕緯)' : '🧒 弟弟 (敬傑)'}</p>
+                    <p className="text-5xl md:text-6xl font-black text-[#5B5CE6] drop-shadow-sm">{data.balances[k]} <span className="text-xl text-slate-400 font-bold">分</span></p>
+                  </div>
+                  
+                  <div className="p-6 md:p-8 bg-slate-50/50 border-b border-slate-100">
+                    <h3 className="text-lg md:text-xl font-bold text-slate-700 mb-4">【 每日任務審核 】</h3>
+                    <div className="mb-6 flex items-center"><span className="text-base md:text-lg font-bold text-slate-600">狀態：</span>{statusBadge}</div>
+                    
+                    {sub.status === 'pending' && (
+                      <div className="bg-white p-6 rounded-2xl border border-amber-200 shadow-sm mb-6">
+                        <p className="font-bold text-slate-700 mb-4 text-base md:text-lg">請確認孩子是否確實完成：</p>
+                        <div className="space-y-3">
+                          {sub.details && sub.details.map((t, i) => {
+                              const taskId = typeof t === 'object' ? t.id : t;
+                              const taskTitle = typeof t === 'object' ? t.title : t;
+                              const taskPoints = typeof t === 'object' ? (t.points || 0) : 0;
+                              const isChecked = kidChecks.includes(taskId);
+                              return (
+                                <label key={i} className={`flex items-start space-x-4 cursor-pointer p-4 rounded-xl border transition-colors ${isChecked ? 'bg-indigo-50 border-indigo-200' : 'bg-slate-50 border-slate-200 opacity-50'}`}>
+                                    <input type="checkbox" checked={isChecked} onChange={() => toggleParentVerify(taskId)} className="mt-1.5 w-6 h-6 text-indigo-600 rounded" />
+                                    <span className={`flex-1 text-base md:text-lg leading-relaxed ${isChecked ? 'text-slate-800 font-bold' : 'text-slate-400 line-through'}`}>{taskTitle} <span className="text-indigo-500 font-black ml-2">(+{taskPoints})</span></span>
+                                </label>
+                              );
+                          })}
+                        </div>
+                        <div className="font-black text-slate-800 mt-6 border-t border-slate-100 pt-4 flex justify-between items-center">
+                            <span className="text-lg md:text-xl">實際核准總分：</span><span className="text-3xl text-indigo-600">+{verifiedPoints} 分</span>
+                        </div>
+                      </div>
+                    )}
+                    {sub.status === 'pending' && <button onClick={() => approveTask(k, verifiedPoints, verifiedTitles)} className="w-full bg-emerald-500 text-white py-5 rounded-2xl font-black text-xl md:text-2xl shadow-lg hover:bg-emerald-600 transition-transform active:scale-95">✅ 審核無誤，發放分數</button>}
+                  </div>
+
+                  <div className="p-6 md:p-8 border-b border-slate-100">
+                    <h3 className="text-lg md:text-xl font-bold text-slate-700 mb-4">【 手動調整分數 】</h3>
+                    <div className="flex flex-col md:flex-row md:space-x-4 space-y-4 md:space-y-0">
+                      <input type="text" placeholder="輸入事由 (例: 主動幫忙做家事)" value={manualReason[k]} onChange={(e) => setManualReason({...manualReason, [k]: e.target.value})} className="flex-[2] border border-slate-200 rounded-xl p-4 text-base md:text-lg outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 bg-slate-50" />
+                      <input type="number" placeholder="分數" value={manualPoints[k]} onChange={(e) => setManualPoints({...manualPoints, [k]: e.target.value})} className="flex-1 border border-slate-200 rounded-xl p-4 text-base md:text-lg outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 bg-slate-50" />
+                      <button onClick={() => executeManualUpdate(k, true)} className="flex-1 bg-indigo-100 text-indigo-700 font-bold rounded-xl shadow-sm text-lg py-4 md:py-0">加分</button>
+                      <button onClick={() => executeManualUpdate(k, false)} className="flex-1 bg-rose-100 text-rose-700 font-bold rounded-xl shadow-sm text-lg py-4 md:py-0">扣分</button>
+                    </div>
+                  </div>
+
+                  <div className="p-6 md:p-8 border-b border-slate-100 bg-rose-50/40">
+                    <h3 className="text-lg md:text-xl font-bold text-rose-800 mb-5">🚨【 公告欄違規扣分 】</h3>
+                    <div className="space-y-6">
+                      <div>
+                        <p className="text-sm md:text-base font-black text-rose-500 mb-3">扣 5 分項目：</p>
+                        <div className="flex flex-wrap gap-3">
+                          {['發出怪聲音', '自言自語', '吃飯發出聲音', '坐下把腳放在椅子上', '抖腳', '在家跑跳', '做怪動作'].map(reason => (
+                            <button key={reason} onClick={() => executeQuickPenalty(k, reason, 5)} className="text-sm md:text-base bg-white border border-rose-200 text-rose-600 px-4 py-2 rounded-xl hover:bg-rose-500 hover:text-white transition-colors shadow-sm font-bold active:scale-95">
+                              {reason}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <p className="text-sm md:text-base font-black text-rose-500 mb-3">扣 10 分項目：</p>
+                        <div className="flex flex-wrap gap-3">
+                          {['時間內要求完成的事未完成並且超過時間', '事情提醒3次以上未見行動沒有改變', '事情沒有做好被糾正態度不佳'].map(reason => (
+                            <button key={reason} onClick={() => executeQuickPenalty(k, reason, 10)} className="text-sm md:text-base bg-white border border-rose-200 text-rose-600 px-4 py-2 rounded-xl hover:bg-rose-500 hover:text-white transition-colors shadow-sm font-bold active:scale-95">
+                              {reason}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <p className="text-sm md:text-base font-black text-rose-600 mb-3">扣 15 分項目 (嚴重違規)：</p>
+                        <div className="flex flex-wrap gap-3">
+                          {['書本不明原因破損、不愛惜物品亂丟或者不見（東西不見需加扣小花購買新品）', '上課不守規矩、教室走廊跑步', '被老師點名或者同學檢舉', '帶不應該要帶的東西到學校', '向同學要吃的或者拿取不屬於自己的東西'].map(reason => (
+                            <button key={reason} onClick={() => executeQuickPenalty(k, reason, 15)} className="text-sm md:text-base bg-white border border-rose-300 text-rose-700 px-4 py-3 rounded-xl hover:bg-rose-600 hover:text-white transition-colors shadow-sm font-black active:scale-95 text-left leading-relaxed">
+                              {reason}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-6 md:p-8">
+                    <h3 className="text-lg md:text-xl font-bold text-slate-700 mb-4">【 紀錄管理 (修改/刪除) 】</h3>
+                    <div className="max-h-80 overflow-y-auto space-y-3 pr-2">
+                      {kidHistory.length === 0 ? <p className="text-base text-slate-400 text-center py-6 bg-slate-50 rounded-xl">尚無任何紀錄</p> : 
+                        kidHistory.map(h => (
+                          <div key={h.id} className="bg-slate-50 p-4 rounded-xl border border-slate-200 flex justify-between items-center hover:bg-slate-100 transition-colors">
+                            <div className="flex-1 pr-4">
+                              <p className="text-base md:text-lg font-bold text-slate-700 leading-snug line-clamp-2">{h.action}</p>
+                              <p className="text-sm text-slate-400 mt-1">{h.date} {h.time}</p>
+                            </div>
+                            <div className="flex items-center space-x-4">
+                              <span className={`font-black text-2xl ${h.points > 0 ? 'text-emerald-500' : 'text-rose-500'}`}>{h.points > 0 ? '+' : ''}{h.points}</span>
+                              <div className="flex flex-col space-y-2">
+                                <button onClick={() => handleEditHistoryClick(k, h)} className="text-xs md:text-sm bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg font-bold">修改</button>
+                                <button onClick={() => handleDeleteHistory(k, h)} className="text-xs md:text-sm bg-rose-100 text-rose-700 px-3 py-1.5 rounded-lg font-bold">刪除</button>
+                              </div>
+                            </div>
+                          </div>
+                        ))
+                      }
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
+
+      // --- 畫面 4：孩子操作畫面 (針對 iPad 大幅優化字體與間距) ---
+      const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1);
+      const dayOfWeek = tomorrow.getDay();
+      const weekDaysTW = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
+      
+      let clothingText = "週末便服";
+      if (role === 'chengwei') clothingText = (dayOfWeek === 2) ? '學校體育服' : ((dayOfWeek === 0 || dayOfWeek === 6) ? '週末便服' : '便服');
+      else clothingText = { 1: '運動服', 2: '制服', 3: '便服', 4: '制服', 5: '運動服' }[dayOfWeek] || '週末便服';
+
+      const roleTasks = role === 'chengwei' ? [
+        { id: 'c1', icon: '☀️', title: '晨間啟動 SOP', desc: '6:30準時起床折棉被 ➔ 刷牙(3分)洗臉 ➔ 換裝 ➔ 6:50前餐桌坐好 ➔ 7:10前完成早餐 ➔ 7:25前完成早習測驗 ➔ 7:30前戴好口罩等待出門', points: 10 },
+        { id: 'c2', icon: '🛁', title: '浴室潔淨 SOP', desc: '晚餐、水果後使用牙線清潔手丟垃圾桶 ➔ 刷牙(3分) ➔ 洗澡時間不超過15分鐘 ➔ 洗澡後沐浴乳歸位 ➔ 最後一位使用者洗完後晾乾地墊', points: 10 },
+        { id: 'c3', icon: '🌙', title: '夜間收尾 SOP', desc: '每日聯絡簿簽名 ➔ 整理書包準備好明天學校物品書籍 ➔ 媽媽洗完衣服折好分類放好 ➔ 每日單字本 ➔ 睡前書桌淨空靠攏椅子 ➔ 21:30前上床睡覺', points: 10 },
+        { id: 'c4', icon: '👑', title: '本週加分挑戰', desc: '英文測驗滿分三次以上、聯絡簿沒有紅字', points: 20 }
+      ] : [
+        { id: 'j1', icon: '☀️', title: '晨間啟動 SOP', desc: '6:30準時起床折棉被 ➔ 刷牙(3分)洗臉 ➔ 換裝 ➔ 6:50前餐桌坐好 ➔ 7:10前完成早餐 ➔ 7:15前戴好口罩等待出門', points: 10 },
+        { id: 'j2', icon: '🛁', title: '浴室潔淨 SOP', desc: '晚餐、水果後使用牙線清潔手丟垃圾桶 ➔ 刷牙(3分) ➔ 洗澡時間不超過15分鐘 ➔ 洗澡後沐浴乳歸位 ➔ 最後一位使用者洗完後晾乾地墊', points: 10 },
+        { id: 'j3', icon: '🌙', title: '夜間收尾 SOP', desc: '每日聯絡簿簽名 ➔ 整理書包準備好明天學校物品書籍 ➔ 完成每日單字測驗及練習新單字 ➔ 睡前書桌淨空靠攏椅子 ➔ 21:30前上床睡覺', points: 10 },
+        { id: 'j4', icon: '👑', title: '本週加分挑戰', desc: '英文測驗滿分三次以上、聯絡簿沒有紅字', points: 20 }
+      ];
+
+      const sub = getSubmission(role);
+      const hasSubmittedToday = sub.date === todayStr && sub.status !== 'none';
+      const filteredHistory = (data.history || []).filter(h => h.kid === role && (historyTab === 'all' || (h.type || 'daily') === historyTab));
+      const currentSelectedPoints = roleTasks.filter(t => selectedTasks.includes(t.id)).reduce((sum, t) => sum + t.points, 0);
+
+      const toggleTaskSelection = (taskId) => {
+         if (hasSubmittedToday) return; 
+         setSelectedTasks(prev => prev.includes(taskId) ? prev.filter(id => id !== taskId) : [...prev, taskId]);
+      };
+
+      return (
+        <div>
+          {renderTopHeader()}
+          {renderDialogModal()}
+          <div className="p-4 md:p-8 max-w-4xl mx-auto text-center space-y-6 md:space-y-8 font-sans pb-16 animate-fade-in-up">
+            
+            {/* 總分看板 */}
+            <div className="bg-white py-10 md:py-14 rounded-[2rem] shadow-sm border mt-4 relative">
+              <p className="font-bold text-slate-500 mb-2 text-xl">{role === 'chengwei' ? '哥哥 (埕緯)' : '弟弟 (敬傑)'}</p>
+              <p className="text-8xl md:text-9xl font-black text-[#5B5CE6] drop-shadow-sm leading-none py-2">{data.balances[role]}</p>
+              <p className="text-slate-400 mt-4 font-bold tracking-widest text-sm md:text-base">可用遊戲分鐘數</p>
+              
+              {!redeemMode && (
+                 <button onClick={() => setRedeemMode(true)} className="mt-8 bg-rose-50 text-rose-600 border border-rose-200 px-10 py-4 rounded-full font-black text-lg md:text-xl shadow-sm hover:bg-rose-100 transition-colors">
+                   🎁 兌換遊戲時間
+                 </button>
+              )}
+            </div>
+
+            {/* 兌換面版 */}
+            {redeemMode && (
+              <div className="bg-white p-8 md:p-10 rounded-[2rem] shadow-md border-2 border-rose-300 text-left animate-fade-in-up mt-6">
+                <h3 className="font-black text-slate-800 mb-6 text-center text-xl md:text-2xl">🎮 請選擇兌換額度</h3>
+                <div className="flex space-x-3 mb-6 md:mb-8">
+                  {[15, 30, 45, 60].map(m => (
+                     <button key={m} onClick={() => setRedeemMins(m)} className={`flex-1 py-4 md:py-5 rounded-2xl font-black text-xl border-2 transition-colors ${redeemMins === m ? 'border-rose-500 bg-rose-50 text-rose-700 shadow-inner' : 'border-slate-100 text-slate-400'}`}>
+                       {m}分
+                     </button>
+                  ))}
+                </div>
+                <div className="flex space-x-4">
+                   <button onClick={() => handleRedeem(role)} className="flex-[2] bg-rose-500 text-white font-black text-xl py-5 rounded-2xl hover:bg-rose-600 shadow-md">✅ 確認兌換</button>
+                   <button onClick={() => setRedeemMode(false)} className="flex-1 bg-slate-100 text-slate-600 font-bold text-xl py-5 rounded-2xl border border-slate-200">取消</button>
+                </div>
+              </div>
+            )}
+            
+            {/* 今日任務 SOP (iPad 字體放大排版) */}
+            <div className="bg-white rounded-[2rem] shadow-sm border overflow-hidden text-left mt-8">
+              <div className="bg-slate-50 p-6 md:p-8 border-b">
+                  <h3 className="font-black text-xl md:text-2xl text-slate-800 flex items-center justify-between">
+                      <span>📋 今日任務 SOP</span>
+                      {!hasSubmittedToday && currentSelectedPoints > 0 && <span className="text-base md:text-lg bg-[#5B5CE6] text-white px-4 py-1.5 rounded-full font-bold shadow-sm">預計 +{currentSelectedPoints}</span>}
+                  </h3>
+                  <p className="text-base md:text-lg font-bold text-indigo-800 mt-4 bg-indigo-50 inline-block px-5 py-2.5 rounded-xl border border-indigo-200">
+                      📅 明天 ({weekDaysTW[dayOfWeek]}) 服裝規定：{clothingText}
+                  </p>
+              </div>
+              <div className="divide-y divide-slate-100">
+                  {roleTasks.map((t) => {
+                      const isSelected = selectedTasks.includes(t.id);
+                      return (
+                        <div key={t.id} onClick={() => toggleTaskSelection(t.id)} className={`p-6 md:p-8 flex items-start space-x-5 md:space-x-6 transition-all border-l-[6px] cursor-pointer ${isSelected ? 'bg-indigo-50/60 border-[#5B5CE6]' : 'hover:bg-slate-50 border-transparent'} ${hasSubmittedToday ? 'opacity-60 cursor-not-allowed' : ''}`}>
+                            <div className={`mt-1.5 md:mt-2 flex items-center justify-center w-8 h-8 md:w-10 md:h-10 rounded-lg border-[3px] ${isSelected ? 'bg-[#5B5CE6] border-[#5B5CE6] text-white' : 'border-slate-300 bg-white'}`}>
+                               {isSelected && <span className="text-xl md:text-2xl font-black">✓</span>}
+                            </div>
+                            <span className="text-4xl md:text-5xl mt-0.5">{t.icon}</span>
+                            <div className="flex-1">
+                                <div className="flex justify-between items-center mb-2">
+                                   <h4 className={`font-black text-xl md:text-2xl ${isSelected ? 'text-indigo-900' : 'text-slate-700'}`}>{t.title}</h4>
+                                   <span className="text-sm md:text-base font-black text-[#5B5CE6] bg-indigo-100 px-3 md:px-4 py-1.5 rounded-full">+{t.points} 分</span>
+                                </div>
+                                <p className={`text-base md:text-lg font-medium leading-loose md:leading-[2] tracking-wide ${isSelected ? 'text-indigo-800' : 'text-slate-600'}`}>{t.desc}</p>
+                            </div>
+                        </div>
+                      );
+                  })}
+              </div>
+            </div>
+
+            {/* 打卡送出按鈕 */}
+            <div className="pt-8 pb-4">
+              {!hasSubmittedToday ? (
+                <button onClick={handleChildSubmit} className="w-full py-6 bg-[#5B5CE6] text-white rounded-2xl font-black shadow-lg shadow-indigo-200 text-2xl md:text-3xl hover:bg-indigo-700 transition-transform active:scale-95">
+                  📤 睡前打卡！送出 {currentSelectedPoints > 0 ? `(${currentSelectedPoints}分)` : ''}
+                </button>
+              ) : (
+                <div className={`p-8 md:p-10 rounded-3xl font-bold border-2 shadow-sm flex flex-col items-center ${sub.status === 'pending' ? 'bg-amber-50 text-amber-800 border-amber-200' : 'bg-emerald-50 text-emerald-800 border-emerald-200'}`}>
+                  <span className="text-5xl md:text-6xl mb-4">{sub.status === 'pending' ? '⏳' : '✅'}</span>
+                  <div className="text-center whitespace-pre-wrap leading-loose text-xl md:text-2xl font-black">
+                    {sub.status === 'pending' ? `已送出任務 (+${sub.points}分)\n等待爸媽審核中... (${sub.time})` : '今日任務已完成核准！\n明日請繼續保持！'}
+                  </div>
+                  {sub.status === 'pending' && (
+                    <button onClick={() => cancelSubmission(role, roleTasks)} className="mt-8 px-8 py-4 bg-white text-amber-700 border-2 border-amber-300 rounded-2xl hover:bg-amber-100 shadow-sm text-lg md:text-xl font-black w-full md:w-auto">
+                      ✏️ 發現選錯了？點我撤回修改
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* 歷史紀錄 */}
+            <div className="bg-white rounded-[2rem] shadow-sm border p-6 md:p-8 text-left mt-10">
+              <h3 className="font-black text-xl md:text-2xl text-slate-800 mb-6">📜 紀錄明細</h3>
+              <div className="flex space-x-3 mb-6 overflow-x-auto pb-2 scrollbar-hide">
+                 <button onClick={()=>setHistoryTab('all')} className={`px-5 py-2 text-base font-bold rounded-full whitespace-nowrap transition-colors ${historyTab==='all' ? 'bg-slate-800 text-white shadow-md' : 'bg-slate-100 text-slate-500'}`}>全部</button>
+                 <button onClick={()=>setHistoryTab('daily')} className={`px-5 py-2 text-base font-bold rounded-full whitespace-nowrap transition-colors ${historyTab==='daily' ? 'bg-[#5B5CE6] text-white shadow-md' : 'bg-slate-100 text-slate-500'}`}>每日任務</button>
+                 <button onClick={()=>setHistoryTab('redeem')} className={`px-5 py-2 text-base font-bold rounded-full whitespace-nowrap transition-colors ${historyTab==='redeem' ? 'bg-rose-500 text-white shadow-md' : 'bg-slate-100 text-slate-500'}`}>兌換紀錄</button>
+                 <button onClick={()=>setHistoryTab('manual')} className={`px-5 py-2 text-base font-bold rounded-full whitespace-nowrap transition-colors ${historyTab==='manual' ? 'bg-amber-500 text-white shadow-md' : 'bg-slate-100 text-slate-500'}`}>手動調整</button>
+              </div>
+
+              {filteredHistory.length === 0 ? (
+                <div className="bg-slate-50 rounded-2xl py-10 text-center border border-slate-100"><p className="text-slate-400 text-base md:text-lg font-bold">此分類尚無紀錄</p></div>
+              ) : (
+                <ul className="space-y-4">
+                  {filteredHistory.slice(0, 15).map(h => {
+                     const isExpanded = expandedLogId === h.id;
+                     return (
+                       <li key={h.id} className={`bg-slate-50 rounded-2xl border ${isExpanded ? 'border-slate-300 shadow-sm' : 'border-slate-100'} overflow-hidden transition-all`}>
+                         <div onClick={() => setExpandedLogId(isExpanded ? null : h.id)} className="flex justify-between items-center p-5 md:p-6 cursor-pointer hover:bg-slate-100/50">
+                           <div className="flex-1 pr-4">
+                             <p className="font-bold text-base md:text-xl text-slate-700 flex items-center leading-snug">{h.action} {h.details && h.details.length > 0 && <span className={`ml-3 text-[12px] text-slate-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`}>▼</span>}</p>
+                             <p className="text-sm md:text-base text-slate-400 mt-2 font-medium">{h.date} {h.time}</p>
+                           </div>
+                           <span className={`font-black text-2xl md:text-3xl whitespace-nowrap ${h.points > 0 ? 'text-emerald-500' : 'text-rose-500'}`}>{h.points > 0 ? '+' : ''}{h.points}</span>
+                         </div>
+                         {isExpanded && h.details && h.details.length > 0 && (
+                           <div className="bg-white p-5 md:p-6 border-t border-slate-100 text-base md:text-lg text-slate-600">
+                             <p className="font-bold mb-3 text-sm md:text-base text-slate-400 tracking-wider">紀錄內容：</p>
+                             <ul className="list-disc pl-6 space-y-2 md:space-y-3 font-medium leading-relaxed">
+                                {h.details.map((detail, idx) => {
+                                    const text = typeof detail === 'object' ? `${detail.title} (+${detail.points})` : detail;
+                                    return <li key={idx}>{text}</li>;
+                                })}
+                             </ul>
+                           </div>
+                         )}
+                       </li>
+                     )
+                  })}
+                </ul>
+              )}
+            </div>
+            
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
